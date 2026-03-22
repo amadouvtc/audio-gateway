@@ -1,24 +1,33 @@
-# I am choosing Ubuntu 24.04 to ensure we have GCC 13+ and Clang 18+ 
-# available natively for C++23 support.
-FROM mcr.microsoft.com/devcontainers/cpp:1-ubuntu-24.04
-
-# I am installing the industrial essentials. 
-# 'libasound2-dev' is the header package I need to compile ALSA code.
-# 'alsa-utils' gives me command-line tools like 'aplay' to test hardware inside the container.
+# --- STAGE 1: The Base ---
+# We install all tools once so they are cached for all sub-stages.
+FROM mcr.microsoft.com/devcontainers/cpp:1-ubuntu-24.04 AS base
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get -y install --no-install-recommends \
-    libasound2-dev \
-    libgtest-dev \
-    cmake \
-    g++ \
-    alsa-utils \
-    clang-tidy \
-    clang-format \
-    cmake \
-    gdb \
-    cppcheck
+    libasound2-dev cmake clang ccache cppcheck \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
 
-# I am adding the 'vscode' user to the 'audio' group. 
-# This is my choice to ensure that my C++ application has permission 
-# to open the /dev/snd hardware nodes without needing to run as root.
-RUN usermod -aG audio vscode
+# --- STAGE 2: The Audit (The "Microscope") ---
+# This stage is for Static Analysis. If this fails, CI turns RED here.
+FROM base AS audit
+COPY . .
+RUN --mount=type=cache,target=/root/.ccache \
+    cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON && \
+    cppcheck --project=build/compile_commands.json --enable=all --error-exitcode=1 -i build/_deps
+
+# --- STAGE 3: The Builder ---
+# We only compile here. We copy the "clean" code from the audit stage.
+FROM base AS builder
+COPY --from=audit /app .
+RUN --mount=type=cache,target=/root/.ccache \
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache && \
+    cmake --build build --config Release
+
+# --- STAGE 4: The Runtime (The Final Artifact) ---
+FROM ubuntu:24.04 AS runtime
+RUN apt-get update && apt-get install -y libasound2 alsa-utils && rm -rf /var/lib/apt/lists/*
+RUN useradd -m gatewayuser && usermod -aG audio gatewayuser
+USER gatewayuser
+WORKDIR /app
+COPY --from=builder /app/build/audio_gateway .
+ENTRYPOINT ["./AudioGateway"]

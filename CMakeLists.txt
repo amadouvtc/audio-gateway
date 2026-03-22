@@ -50,7 +50,7 @@ enable_testing()
 
 # I am creating the test executable. 
 # I am NOT adding a main file to the sources because I am linking gtest_main.
-add_executable(unit_tests tests/test_hardware.cpp)
+add_executable(unit_tests tests/unit/test_hardware.cpp)
 
 # I am linking the gateway logic, the core GTest library, 
 # and the gtest_main entry point.
@@ -66,8 +66,26 @@ target_link_libraries(unit_tests
 include(GoogleTest)
 gtest_discover_tests(unit_tests)
 
+# --- 2. The Fuzz Target (LibFuzzer) ---
+# I wrap this in an OPTION so it doesn't slow down your local development.
+option(ENABLE_FUZZING "Build the Fuzzer targets" OFF)
 
-
+if(ENABLE_FUZZING)
+    # I am checking for Clang because GCC's libFuzzer support is 'messy'.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        add_executable(fuzz_ring_buffer tests/fuzz/fuzz_ring_buffer.cpp)
+        
+        # I am linking to 'gateway_lib' which contains your RingBuffer.
+        target_link_libraries(fuzz_ring_buffer PRIVATE gateway_lib)
+        
+        target_compile_options(fuzz_ring_buffer PRIVATE 
+            -fsanitize=fuzzer,address,undefined)
+        target_link_options(fuzz_ring_buffer PRIVATE 
+            -fsanitize=fuzzer,address,undefined)
+    else()
+        message(FATAL_ERROR "Fuzzing requires Clang (clang++). Please set CMAKE_CXX_COMPILER.")
+    endif()
+endif()
 
 
 

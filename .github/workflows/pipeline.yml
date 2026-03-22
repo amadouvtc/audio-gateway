@@ -1,4 +1,4 @@
-name: Audio Gateway CI (Docker-Synced)
+name: Audio Gateway CI (Industrial Standard)
 
 on:
   push:
@@ -10,34 +10,53 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     
-    # I am telling GitHub to use your specific Dockerfile as the environment.
-    # This prevents the "missing <print> header" or "wrong GCC version" issues.
-    container:
-      image: mcr.microsoft.com/devcontainers/cpp:1-ubuntu-24.04
-
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Install System Dependencies
-      # I am mirroring your Dockerfile 'RUN' commands exactly.
+    # This enables the high-speed 'type=cache' mounts we put in the Dockerfile
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # Step 1: Static Analysis Gate
+    # We only run the 'audit' stage. If cppcheck fails, CI stops here.
+    - name: 1. Run Static Analysis (Audit)
       run: |
-        apt-get update && apt-get install -y \
-          libasound2-dev \
-          libgtest-dev \
-          cmake \
-          g++ \
-          build-essential
+        docker build --target audit \
+          --cache-from type=gha \
+          --cache-to type=gha,mode=max \
+          -t gateway-audit .
 
-    - name: Configure CMake
-      # I am using Release mode for the cloud to catch optimization bugs.
-      run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+    # Step 2: Full Compilation & Packaging
+    # Docker skips the audit because it's already cached from Step 1.
+    - name: 2. Build Production Image
+      run: |
+        docker build \
+          --cache-from type=gha \
+          --cache-to type=gha,mode=max \
+          -t audio-gateway:latest .
 
-    - name: Build Project
-      run: cmake --build build --config Release
+    # Step 3: Unit Testing
+    # We run the tests that were compiled inside the image.
+    - name: 3. Run GTest Suite
+      run: |
+        docker run --entrypoint ctest audio-gateway:latest --output-on-failure
 
-    - name: Run GTest Suite
-      working-directory: build
-      # I am using the '--verbose' flag so we can see the GTest 
-      # output directly in the GitHub Actions console.
-      run: ctest --output-on-failure
+    # Step 4: Fuzzing (The "Final Boss")
+    # We use a separate cache for the Fuzzer's "Brain" (the corpus)
+    - name: Restore Fuzz Corpus
+      uses: actions/cache@v4
+      with:
+        path: tests/fuzz/corpus
+        key: fuzz-corpus-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          fuzz-corpus-${{ runner.os }}-
+
+    - name: 4. Run Controlled Fuzz
+      # We mount the corpus folder from the runner into the container
+      run: |
+        mkdir -p tests/fuzz/corpus
+        docker run -v $(pwd)/tests/fuzz/corpus:/app/corpus \
+          --entrypoint ./fuzz_ring_buffer \
+          audio-gateway:latest \
+          -max_total_time=60 -rss_limit_mb=2048 /app/corpus
